@@ -3,16 +3,14 @@ import yaml
 import torch
 
 from datasets import load_dataset
-
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
     BitsAndBytesConfig,
 )
-
 from peft import LoraConfig
-
 from trl import SFTConfig, SFTTrainer
+
 
 
 
@@ -22,20 +20,23 @@ CONFIG_PATH = (
     ROOT / "finetune" / "configs" / "qlora_config.yaml"
 )
 
+DATASET_PATH = (
+    ROOT / "dataset" / "training_pairs.jsonl"
+)
 
-with open(CONFIG_PATH, "r") as f:
+
+
+
+with open(CONFIG_PATH, "r", encoding="utf-8") as f:
     config = yaml.safe_load(f)
 
 
 MODEL_NAME = config["model"]["name"]
+
 MAX_SEQ_LENGTH = config["model"]["max_seq_length"]
 
-DATASET_PATH = ROOT / "dataset" / "training_pairs.jsonl"
-
 OUTPUT_DIR = (
-    ROOT
-    / "finetune"
-    / config["output"]["directory"]
+    ROOT / config["output"]["directory"]
 ).resolve()
 
 
@@ -47,8 +48,40 @@ dataset = load_dataset(
     split="train",
 )
 
-print(f"Loaded {len(dataset)} examples")
+print(f"Loaded {len(dataset)} total examples")
 
+
+
+
+required_columns = {"messages"}
+
+missing = required_columns - set(dataset.column_names)
+
+if missing:
+    raise ValueError(
+        f"Dataset is missing required fields: {missing}"
+    )
+
+
+for i, example in enumerate(dataset):
+
+    messages = example["messages"]
+
+    if not isinstance(messages, list):
+        raise ValueError(
+            f"Example {i}: messages must be a list"
+        )
+
+    roles = [message["role"] for message in messages]
+
+    if roles != ["system", "user", "assistant"]:
+        raise ValueError(
+            f"Example {i}: expected roles "
+            f"['system', 'user', 'assistant'], got {roles}"
+        )
+
+
+print("Dataset structure validated")
 
 
 
@@ -65,6 +98,7 @@ print(f"Validation examples: {len(eval_dataset)}")
 
 
 
+
 tokenizer = AutoTokenizer.from_pretrained(
     MODEL_NAME,
     trust_remote_code=True,
@@ -75,19 +109,27 @@ if tokenizer.pad_token is None:
 
 
 
-
 bnb_config = BitsAndBytesConfig(
+
     load_in_4bit=True,
+
     bnb_4bit_quant_type="nf4",
+
     bnb_4bit_compute_dtype=torch.float16,
+
     bnb_4bit_use_double_quant=True,
 )
 
 
+
 model = AutoModelForCausalLM.from_pretrained(
+
     MODEL_NAME,
+
     quantization_config=bnb_config,
+
     device_map="auto",
+
     trust_remote_code=True,
 )
 
@@ -97,15 +139,20 @@ model.config.use_cache = False
 
 
 lora_config = LoraConfig(
+
     r=config["lora"]["r"],
+
     lora_alpha=config["lora"]["alpha"],
+
     lora_dropout=config["lora"]["dropout"],
 
     target_modules=config["lora"]["target_modules"],
 
     bias="none",
+
     task_type="CAUSAL_LM",
 )
+
 
 
 
@@ -134,6 +181,7 @@ training_args = SFTConfig(
     optim="paged_adamw_8bit",
 
     fp16=config["training"]["fp16"],
+
     bf16=False,
 
     gradient_checkpointing=(
@@ -145,10 +193,13 @@ training_args = SFTConfig(
     logging_steps=config["training"]["logging_steps"],
 
     eval_strategy="steps",
+
     eval_steps=config["training"]["eval_steps"],
 
     save_strategy="steps",
+
     save_steps=config["training"]["save_steps"],
+
     save_total_limit=config["training"]["save_total_limit"],
 
     load_best_model_at_end=True,
@@ -178,15 +229,24 @@ trainer = SFTTrainer(
 
 
 
-print("\nStarting QLoRA training...\n")
+
+print()
+print("=" * 60)
+print("Starting QLoRA fine-tuning")
+print("=" * 60)
+print()
 
 trainer.train()
 
 
 
-
 trainer.save_model(str(OUTPUT_DIR))
+
 tokenizer.save_pretrained(str(OUTPUT_DIR))
 
-print("\nTraining complete.")
-print(f"Adapter saved to: {OUTPUT_DIR}")
+
+print()
+print("=" * 60)
+print("Training complete")
+print("=" * 60)
+print(f"Adapter: {OUTPUT_DIR}")
