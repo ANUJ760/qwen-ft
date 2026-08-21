@@ -6,7 +6,9 @@ outputs/*.docx
 dataset/raw_content/*
 dataset/target_json/*
 dataset/training_pairs.jsonl
+examples/
 finetune/checkpoints/*
 !dataset/raw_content/.gitkeep
 !dataset/target_json/.gitkeep
 !finetune/checkpoints/.gitkeep
+guidelines/
