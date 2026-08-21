@@ -1,0 +1,108 @@
+# Document Compilation Generator
+
+AI-powered pipeline: raw content → fine-tuned LLM → structured JSON →
+validation → deterministic formatter → DOCX/PDF, matching a submission's
+Compilation Guidelines.
+
+## Project structure
+
+```
+doc_compiler/
+├── README.md                    (this file)
+│
+├── guidelines/
+│   └── Compilation_Guidelines.pdf   Source formatting rules (margins, fonts,
+│                                     spacing, naming convention). The
+│                                     formatter is a literal translation of
+│                                     this file — see formatter/formatter.py.
+│
+├── examples/                    Practical/example source documents used to
+│   ├── E01_5A2_33a.pdf          derive the content schema and (later) seed
+│   ├── E01_5A2_33b.pdf          the teacher-distillation dataset.
+│   ├── E02_5A2_33.docx          NOTE: E01_5A2_33b (the embedded SRS) is
+│   ├── E02_5A2_33.pdf           excluded from schema/dataset scope per
+│   └── E03_5A2_33.docx          project decision — treated as an exception,
+│                                 not a template instance.
+│
+├── schema/
+│   └── schema.py                 [BUILT] Pydantic models (ExperimentReport,
+│                                  Particulars, Section, content blocks,
+│                                  SubmissionMeta). The contract between the
+│                                  LLM's output and the formatter's input.
+│                                  Also the validation gate (Step 4 of the
+│                                  pipeline).
+│
+├── formatter/
+│   └── formatter.py              [BUILT] Deterministic ExperimentReport ->
+│                                  DOCX -> PDF renderer. Zero content-
+│                                  generation logic; every parameter maps
+│                                  directly to guidelines/Compilation_
+│                                  Guidelines.pdf. Verified against real
+│                                  E02-shaped input (rendered + visually
+│                                  inspected).
+│
+├── dataset/                      [NOT YET BUILT]
+│   ├── generate_dataset.py       Teacher-distillation script: for each
+│   │                             example doc, (a) reverse-generates a
+│   │                             plausible messy "raw content" input, and
+│   │                             (b) produces the target ExperimentReport
+│   │                             JSON. Every generated pair is validated
+│   │                             against schema.py before being kept.
+│   ├── raw_content/              Generated synthetic raw-content inputs.
+│   ├── target_json/              Generated + validated target JSON per pair.
+│   └── training_pairs.jsonl      Final assembled fine-tuning dataset
+│                                 (prompt/completion or chat-format pairs).
+│
+├── finetune/                     [NOT YET BUILT]
+│   ├── train_qlora.py            LoRA/QLoRA fine-tuning script (local GPU,
+│   │                             8-12GB VRAM -> 7B-class base model,
+│   │                             4-bit quant).
+│   ├── configs/
+│   │   └── qlora_config.yaml     LoRA rank/alpha, target modules, training
+│   │                             hyperparameters.
+│   └── checkpoints/              Saved LoRA adapters.
+│
+├── inference/                    [NOT YET BUILT]
+│   └── generate_report.py        Runs fine-tuned model against new raw
+│                                 content, with the current Compilation
+│                                 Guidelines injected via prompting/RAG
+│                                 (not baked into the fine-tune, so
+│                                 guideline changes don't require
+│                                 retraining). Outputs raw JSON candidate.
+│
+├── validation/                   [NOT YET BUILT — logic mostly lives in
+│   └── validate_json.py          schema.py already; this wraps it with
+│                                 retry-on-invalid-JSON handling for the
+│                                 inference loop.]
+│
+├── evaluation/                   [NOT YET BUILT]
+│   └── evaluate.py               Compares generated docs against held-out
+│                                 practical examples: structural fidelity,
+│                                 content fidelity, formatting fidelity.
+│
+└── outputs/                      Final rendered DOCX/PDF, named per the
+                                  guideline's convention (e.g. E02_5A2_33.pdf),
+                                  via SubmissionMeta.filename().
+```
+
+## Pipeline recap
+
+```
+Raw Content --> Fine-tuned LLM (+ Guidelines via RAG/prompting)
+            --> Structured JSON (schema.py contract)
+            --> Validation (schema.py / validation/validate_json.py)
+            --> Formatter (formatter/formatter.py)
+            --> DOCX --> PDF (outputs/)
+```
+
+## Status
+
+| Component | Status |
+|---|---|
+| Content schema | ✅ Built & validated against real example |
+| Formatter | ✅ Built & verified (rendered + visually inspected) |
+| Dataset generation | ⬜ Next up |
+| QLoRA fine-tuning | ⬜ Pending dataset |
+| Inference + RAG guideline injection | ⬜ Pending fine-tune |
+| Validation wrapper | ⬜ Pending inference loop |
+| Evaluation harness | ⬜ Pending fine-tune |
