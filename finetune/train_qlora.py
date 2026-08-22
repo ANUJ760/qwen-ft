@@ -176,19 +176,21 @@ training_args = SFTConfig(
 
     learning_rate=config["training"]["learning_rate"],
 
-    warmup_ratio=config["training"]["warmup_ratio"],
+    warmup_steps=config["training"]["warmup_steps"],
 
     optim="paged_adamw_8bit",
 
     fp16=config["training"]["fp16"],
 
-    bf16=False,
+    bf16=config["training"]["bf16"],
 
     gradient_checkpointing=(
         config["training"]["gradient_checkpointing"]
     ),
 
     max_length=MAX_SEQ_LENGTH,
+
+    assistant_only_loss=True,
 
     logging_steps=config["training"]["logging_steps"],
 
