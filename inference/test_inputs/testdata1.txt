@@ -1,0 +1,10 @@
+Online voting system.
+
+Aim is to design an online voting system where registered students
+can securely cast votes.
+
+Students need registration and login. Admin manages candidates and
+election details. After login student can see candidates and cast
+vote. System should prevent multiple voting.
+
+Need UML diagrams and description of system functionality.
