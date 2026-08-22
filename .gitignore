@@ -12,3 +12,4 @@ finetune/checkpoints/*
 !dataset/target_json/.gitkeep
 !finetune/checkpoints/.gitkeep
 guidelines/
+venv312/
