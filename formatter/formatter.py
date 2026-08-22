@@ -248,6 +248,10 @@ def _render_section(doc, section: Section):
 # ---------------------------------------------------------------------------
 
 def render_docx(report: ExperimentReport, output_path: str) -> str:
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
     doc = Document()
 
     # --- page setup ---
@@ -291,19 +295,31 @@ def render_pdf(report: ExperimentReport, output_dir: str) -> str:
     (SubmissionMeta.filename())."""
     import subprocess
     import os
+    import tempfile
 
-    docx_path = os.path.join(output_dir, "_tmp_render.docx")
-    render_docx(report, docx_path)
+    os.makedirs(output_dir, exist_ok=True)
 
-    subprocess.run(
-        ["soffice", "--headless", "--convert-to", "pdf", "--outdir", output_dir, docx_path],
-        check=True,
-        capture_output=True,
-    )
+    with tempfile.TemporaryDirectory(dir=output_dir) as tmp_dir:
+        docx_path = os.path.join(tmp_dir, "render.docx")
+        render_docx(report, docx_path)
 
-    generated_pdf = os.path.join(output_dir, "_tmp_render.pdf")
-    final_name = report.submission_meta.filename(ext="pdf")
-    final_path = os.path.join(output_dir, final_name)
-    os.replace(generated_pdf, final_path)
-    os.remove(docx_path)
+        subprocess.run(
+            [
+                "soffice",
+                "--headless",
+                "--convert-to",
+                "pdf",
+                "--outdir",
+                tmp_dir,
+                docx_path,
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+        generated_pdf = os.path.join(tmp_dir, "render.pdf")
+        final_name = report.submission_meta.filename(ext="pdf")
+        final_path = os.path.join(output_dir, final_name)
+        os.replace(generated_pdf, final_path)
+
     return final_path

@@ -25,7 +25,6 @@ Design notes
 from __future__ import annotations
 
 from datetime import date
-from enum import Enum
 from typing import List, Optional, Union, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -65,6 +64,27 @@ class TableBlock(BaseModel):
     type: Literal["table"] = "table"
     header: Optional[List[str]] = None
     rows: List[List[str]] = Field(..., min_length=1)
+
+    @model_validator(mode="after")
+    def _rows_are_rectangular(self) -> "TableBlock":
+        width = len(self.rows[0])
+        if width == 0:
+            raise ValueError("table rows must contain at least one column")
+
+        for index, row in enumerate(self.rows, start=1):
+            if len(row) != width:
+                raise ValueError(
+                    "table rows must all have the same number of columns; "
+                    f"row 1 has {width}, row {index} has {len(row)}"
+                )
+
+        if self.header is not None and len(self.header) != width:
+            raise ValueError(
+                "table header must have the same number of columns as rows; "
+                f"header has {len(self.header)}, rows have {width}"
+            )
+
+        return self
 
 
 ContentBlock = Union[ParagraphBlock, BulletListBlock, FigureBlock, TableBlock]
@@ -151,6 +171,21 @@ class ExperimentReport(BaseModel):
                     f"(Particulars occupies section 1). Expected {expected}, got {s.number}."
                 )
             expected += 1
+        return self
+
+    @model_validator(mode="after")
+    def _particulars_match_submission_meta(self) -> "ExperimentReport":
+        if self.particulars.roll_number != self.submission_meta.roll_number:
+            raise ValueError(
+                "particulars.roll_number must match "
+                "submission_meta.roll_number"
+            )
+
+        if self.particulars.section != self.submission_meta.division:
+            raise ValueError(
+                "particulars.section must match submission_meta.division"
+            )
+
         return self
 
 
