@@ -1,339 +1,689 @@
-"""
-Extracts gold-standard ExperimentReport JSON from existing, already-correct
-example .docx files (E01-E03 style). This is NOT a general-purpose docx
-parser — it's a heuristic extractor tuned to the specific pattern observed
-across the example set:
-
-    - A title paragraph ("EXPERIMENT NN" or "EXPERIMENT NO. N")
-    - Particulars fields, either as prose ("Aim: ...", "Author: ... (Section:
-      A2, Roll No: 33)") or as a table (label | value rows)
-    - Numbered body section headings ("2. Short Description...", bold, short)
-    - Bullet items starting with "\u2022 ", optionally with a "Lead-in: rest"
-      pattern
-    - Inline images followed by a "Fig. N \u2014 caption" paragraph
-
-Output is renumbered canonically: Particulars is always implicit Section 1
-(never numbered in the source), and body sections are renumbered 2, 3, 4...
-in document order regardless of what number the source document used. This
-is a deliberate normalization, not a parsing artifact — the whole point of
-the pipeline is a STANDARDIZED output structure; source documents were not
-all self-consistent about numbering (E02 numbers particulars as "1." and
-starts body at "2."; E03 leaves particulars unnumbered and starts body at
-"1."). The schema's own validator (schema.py) enforces the canonical
-2,3,4... convention, so this extractor must match it.
-
-Every extracted result is run through ExperimentReport.model_validate()
-before being written — if extraction produced something that violates the
-schema, this script errors instead of writing bad gold data.
-
-KNOWN LIMITATION: this heuristic set does NOT capture E01a's structure
-(multi-level numbered subsections like "2.1", ALL-CAPS unnumbered headings
-like "SUMMARY OF REQUIREMENTS", deeply nested bullet hierarchies with
-bold requirement codes like "FR-1.1"). E01a does not fit the current
-ExperimentReport schema and is excluded from this extraction pass pending
-a decision on whether to extend the schema or treat it as an exception
-(same as E01b/the embedded SRS).
-
-Usage:
-    python extract_gold_json.py ../examples/E02_5A2_33.docx --experiment-no 2 \
-        --semester 5 --division A2 --roll 33 --out target_json/E02.json
-"""
-
-from __future__ import annotations
-
+from pathlib import Path
 import argparse
 import json
 import os
 import re
 import sys
-from datetime import datetime
+import time
 
-import docx
-from docx.oxml.ns import qn
+ROOT = Path(__file__).resolve().parent.parent
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "schema"))
-from schema import ExperimentReport  # noqa: E402
+sys.path.insert(
+    0,
+    str(ROOT),
+)
+sys.path.insert(
+    0,
+    str(ROOT / "schema"),
+)
+
+from schema import ExperimentReport
+from common.prompts import build_gold_extraction_prompt
 
 
-SECTION_HEADING_RE = re.compile(r"^\s*(\d+)\.\s+(.+?)\s*$")
-BULLET_PREFIX_RE = re.compile(r"^[\u2022\-]\s*")
-LEAD_IN_RE = re.compile(r"^([^:]{3,60}):\s+(.+)$")
-NUMBERED_LEAD_IN_RE = re.compile(r"^\d+(?:\.\d+)+\s+([^:]{3,80}):\s+(.+)$")
+DEFAULT_MODEL = "gemini-3.6-flash"
 
-PARTICULARS_LABELS = {
-    "case_study_title": re.compile(r"^case study title\s*:\s*(.+)$", re.I),
-    "aim": re.compile(r"^aim(?:\s+of\s+experiment)?\s*:\s*(.+)$", re.I),
-    "problem_statement": re.compile(r"^problem statement\s*:\s*(.+)$", re.I),
-    "author": re.compile(r"^author\s*:\s*(.+)$", re.I),
-    "date_of_compilation": re.compile(
-        r"^date\s+of\s+(?:compilation|experiment)(?:/submission)?\s*:\s*(.+)$", re.I
-    ),
-}
-INLINE_SECTION_ROLL_RE = re.compile(
-    r"\(?\s*Section\s*:\s*([A-Za-z0-9]+)\s*,\s*Roll\s*(?:No\.?|Number)\s*:\s*(\d+)\s*\)?", re.I
+FILENAME_RE = re.compile(
+    r"^E(?P<experiment>\d+)"
+    r"_"
+    r"(?P<semester>[A-Za-z0-9]+)"
+    r"(?P<division>[A-Za-z]+\d+)"
+    r"_"
+    r"(?P<roll>\d+)"
+    r"(?P<suffix>[A-Za-z])?"
+    r"\.(?P<extension>docx|pdf)$",
+    re.IGNORECASE,
 )
 
 
-def _paragraph_has_image(paragraph) -> bool:
-    return len(paragraph._p.findall(".//" + qn("w:drawing"))) > 0
+SYSTEM_PROMPT = """
+You are the teacher model for a document-compilation dataset.
 
+Your task is to inspect a practical/experiment document and convert its
+actual content into a structured ExperimentReport JSON object.
 
-def _extract_image(paragraph, doc, out_dir: str, idx: int) -> str | None:
-    drawings = paragraph._p.findall(".//" + qn("w:drawing"))
-    if not drawings:
-        return None
-    blips = drawings[0].findall(".//" + qn("a:blip"))
-    if not blips:
-        return None
-    rId = blips[0].get(qn("r:embed"))
-    if rId is None or rId not in doc.part.rels:
-        return None
-    image_part = doc.part.rels[rId].target_part
-    ext = image_part.content_type.split("/")[-1]
-    os.makedirs(out_dir, exist_ok=True)
-    filename = f"figure_{idx}.{ext}"
-    path = os.path.join(out_dir, filename)
-    with open(path, "wb") as f:
-        f.write(image_part.blob)
-    return path
+You MUST preserve information from the source document.
 
+You MUST NOT invent:
+- student names
+- roll numbers
+- dates
+- experiment numbers
+- sections
+- technical facts
+- content that is not supported by the source
 
-def _try_parse_date(text: str) -> str:
-    text = text.strip().rstrip(".")
-    for fmt in ("%B %d, %Y", "%d %B %Y", "%Y-%m-%d", "%d/%m/%Y"):
-        try:
-            return datetime.strptime(text, fmt).date().isoformat()
-        except ValueError:
-            continue
-    return text  # let pydantic raise if still unparseable
+If a required textual field cannot be determined from the document, use
+"<MISSING>".
 
+The output MUST conform to the ExperimentReport schema supplied below.
 
-def extract(docx_path: str, experiment_no: int, semester: str, division: str,
-            roll: str, image_out_dir: str, part_suffix: str | None = None) -> dict:
-    doc = docx.Document(docx_path)
+TOP LEVEL:
 
-    particulars_raw = {
-        "case_study_title": None,
-        "aim": None,
-        "problem_statement": None,
-        "author": None,
-        "section": division,
-        "roll_number": roll,
-        "date_of_compilation": None,
+{
+  "title": "...",
+  "particulars": {...},
+  "sections": [...],
+  "submission_meta": {...}
+}
+
+PARTICULARS:
+
+{
+  "case_study_title": "...",
+  "aim": "...",
+  "problem_statement": "...",
+  "author": "...",
+  "section": "...",
+  "roll_number": "...",
+  "date_of_compilation": "YYYY-MM-DD"
+}
+
+BODY SECTIONS:
+
+Every section MUST have:
+
+{
+  "number": 2,
+  "title": "...",
+  "content": [...]
+}
+
+Use the key "number", NOT "section_number".
+
+Sections must start at 2 and increase sequentially:
+
+2, 3, 4, ...
+
+CONTENT BLOCKS:
+
+Paragraph:
+
+{
+  "type": "paragraph",
+  "text": "..."
+}
+
+Bullet list:
+
+{
+  "type": "bullet_list",
+  "items": [
+    {
+      "lead_in": null,
+      "text": "..."
     }
+  ]
+}
 
-    sections = []
-    current_section = None
-    pending_bullets = None
-    fig_counter = 0
-    title_text = f"Experiment {experiment_no}"
-    next_section_number = 2  # canonical renumbering, per module docstring
+Figure:
 
-    def flush_bullets():
-        nonlocal pending_bullets
-        if pending_bullets and current_section is not None:
-            current_section["content"].append(
-                {"type": "bullet_list", "items": pending_bullets}
-            )
-        pending_bullets = None
+{
+  "type": "figure",
+  "image_ref": "<ASSET_PLACEHOLDER>",
+  "caption": "...",
+  "figure_number": 1
+}
 
-    # --- particulars table (E02-style) ---
-    table_particulars = {}
-    for table in doc.tables:
-        for row in table.rows:
-            if len(row.cells) < 2:
-                continue
-            label = row.cells[0].text.strip().lower()
-            value = row.cells[1].text.strip()
-            if "case study" in label:
-                table_particulars["case_study_title"] = value
-            elif "aim" in label:
-                table_particulars["aim"] = value
-            elif "problem statement" in label:
-                table_particulars["problem_statement"] = value
-            elif label == "author":
-                table_particulars["author"] = value
-            elif "roll" in label:
-                table_particulars["roll_number"] = value
-            elif label == "section" or label == "division":
-                table_particulars["section"] = value
-            elif "date" in label:
-                table_particulars["date_of_compilation"] = value
-    particulars_raw.update({k: v for k, v in table_particulars.items() if v})
+Table:
 
-    body_started = False
+{
+  "type": "table",
+  "header": ["..."],
+  "rows": [
+    ["...", "..."]
+  ]
+}
 
-    for i, p in enumerate(doc.paragraphs):
-        text = p.text.strip()
+For figures, use "<ASSET_PLACEHOLDER>" for image_ref.
 
-        if _paragraph_has_image(p):
-            fig_counter += 1
-            img_path = _extract_image(p, doc, image_out_dir, fig_counter)
-            caption = ""
-            # look ahead for a caption paragraph starting with "Fig."
-            if i + 1 < len(doc.paragraphs):
-                nxt = doc.paragraphs[i + 1].text.strip()
-                if nxt.lower().startswith("fig"):
-                    caption = nxt
-            # look back for a manual "Figure: <description>" lead-in line
-            # (seen in E03) and merge it into the caption if the forward
-            # caption was label-only (e.g. bare "Fig. 1")
-            if i - 1 >= 0:
-                prev = doc.paragraphs[i - 1].text.strip()
-                fig_lead = re.match(r"^figure\s*:\s*(.+)$", prev, re.I)
-                if fig_lead and (not caption or len(caption) < 15):
-                    label = caption or f"Fig. {fig_counter}"
-                    caption = f"{label} \u2014 {fig_lead.group(1).strip()}"
-            if current_section is not None and img_path:
-                flush_bullets()
-                current_section["content"].append(
-                    {"type": "figure", "image_ref": img_path,
-                     "caption": caption or f"Fig. {fig_counter}",
-                     "figure_number": fig_counter}
-                )
-            continue
+For tables, preserve the actual table information from the source.
 
-        if not text:
-            continue
+For bullet lists, do not create empty items.
 
-        # skip a caption line already consumed above
-        if text.lower().startswith("fig.") or text.lower().startswith("fig "):
-            continue
-        # skip a manual "Figure: <caption>" lead-in line that sits before
-        # the actual inline image (seen in E03) — redundant with the figure
-        # block's own caption, not useful as a standalone paragraph
-        if re.match(r"^figure\s*:\s*.+$", text, re.I) and i + 1 < len(doc.paragraphs):
-            continue
+SUBMISSION METADATA:
 
-        heading_match = SECTION_HEADING_RE.match(text)
-        is_heading = bool(heading_match) and len(text) < 100 and (
-            p.runs and p.runs[0].bold
+{
+  "experiment_number": 1,
+  "semester_prefix": "...",
+  "division": "...",
+  "roll_number": "...",
+  "part_suffix": null
+}
+
+The submission metadata is supplied separately from the document filename.
+Use the supplied metadata exactly.
+
+IMPORTANT:
+
+Return ONLY the JSON object.
+
+Do not return:
+- Markdown
+- code fences
+- explanations
+- analysis
+- <think> blocks
+- text before the JSON
+- text after the JSON
+"""
+
+
+def parse_filename(path: Path):
+
+    match = FILENAME_RE.match(
+        path.name
+    )
+
+    if not match:
+        raise ValueError(
+            f"Invalid filename: {path.name}\n"
+            f"Expected format such as:\n"
+            f"E02_5A2_33.pdf\n"
+            f"E03_5A2_33.docx\n"
+            f"E03_5A2_33a.pdf"
         )
 
-        if not body_started:
-            # still in the pre-body particulars zone (unless this line IS
-            # already a heading, e.g. E03 has no "1. Particulars" heading
-            # and jumps straight to "1. Short Description...")
-            matched_field = False
-            for field, rx in PARTICULARS_LABELS.items():
-                m = rx.match(text)
-                if m:
-                    value = m.group(1).strip()
-                    inline = INLINE_SECTION_ROLL_RE.search(value)
-                    if inline:
-                        particulars_raw["section"] = inline.group(1)
-                        particulars_raw["roll_number"] = inline.group(2)
-                        value = INLINE_SECTION_ROLL_RE.sub("", value).strip()
-                    particulars_raw[field] = value
-                    matched_field = True
-                    break
-            if matched_field:
-                continue
-            if text.upper().startswith("EXPERIMENT"):
-                title_text = text
-                continue
-            if re.match(r"^1\.\s+particulars", text, re.I):
-                continue  # the "1. Particulars" heading itself, not content
-            if not is_heading:
-                # stray prose before body starts (e.g. E01a's repeated title
-                # line) — ignore rather than risk mis-filing it
-                continue
-
-        # From here on we're in the body.
-        if is_heading:
-            body_started = True
-            flush_bullets()
-            title_only = heading_match.group(2)
-            current_section = {
-                "number": next_section_number,
-                "title": title_only,
-                "content": [],
-            }
-            next_section_number += 1
-            sections.append(current_section)
-            continue
-
-        if current_section is None:
-            continue  # nothing to attach this text to yet
-
-        bullet_match = BULLET_PREFIX_RE.match(text)
-        numbered_lead_match = NUMBERED_LEAD_IN_RE.match(text)
-        if bullet_match or numbered_lead_match:
-            body_started = True
-            if pending_bullets is None:
-                pending_bullets = []
-            if bullet_match:
-                item_text = BULLET_PREFIX_RE.sub("", text)
-                lead_match = LEAD_IN_RE.match(item_text)
-                if lead_match:
-                    pending_bullets.append(
-                        {"lead_in": lead_match.group(1), "text": lead_match.group(2)}
-                    )
-                else:
-                    pending_bullets.append({"lead_in": None, "text": item_text})
-            else:
-                pending_bullets.append(
-                    {"lead_in": numbered_lead_match.group(1), "text": numbered_lead_match.group(2)}
-                )
-            continue
-
-        flush_bullets()
-        current_section["content"].append({"type": "paragraph", "text": text})
-
-    flush_bullets()
-
-    for k in ("case_study_title", "aim", "problem_statement", "author", "date_of_compilation"):
-        if not particulars_raw[k]:
-            raise ValueError(f"Could not extract particulars field '{k}' from {docx_path}. "
-                              f"Manual fixup needed.")
-
-    particulars_raw["date_of_compilation"] = _try_parse_date(particulars_raw["date_of_compilation"])
-
-    instance = {
-        "title": title_text,
-        "particulars": particulars_raw,
-        "sections": sections,
-        "submission_meta": {
-            "experiment_number": experiment_no,
-            "semester_prefix": semester,
-            "division": division,
-            "roll_number": roll,
-            "part_suffix": part_suffix,
-        },
+    return {
+        "experiment_number": int(
+            match.group("experiment")
+        ),
+        "semester_prefix": match.group(
+            "semester"
+        ),
+        "division": match.group(
+            "division"
+        ),
+        "roll_number": match.group(
+            "roll"
+        ),
+        "part_suffix": match.group(
+            "suffix"
+        ),
     }
-    return instance
+
+
+def load_schema():
+    schema = (
+        ExperimentReport
+        .model_json_schema()
+    )
+
+    return json.dumps(
+        schema,
+        indent=2,
+    )
+
+
+def build_prompt(metadata):
+
+    schema = load_schema()
+
+    return build_gold_extraction_prompt(
+        metadata,
+        schema,
+    )
+
+def output_path_for(metadata, output_dir):
+    experiment = (
+        metadata["experiment_number"]
+    )
+
+    suffix = (
+        metadata["part_suffix"]
+        or ""
+    )
+
+    return (
+        output_dir
+        / f"E{experiment:02d}{suffix}.json"
+    )
+
+
+def clean_json(text):
+
+    text = text.strip()
+
+    if "</think>" in text:
+
+        text = text.split(
+            "</think>",
+            1,
+        )[1].strip()
+
+    if text.startswith(
+        "```json"
+    ):
+
+        text = text[
+            len("```json"):
+        ].strip()
+
+    elif text.startswith(
+        "```"
+    ):
+
+        text = text[
+            len("```"):
+        ].strip()
+
+    if text.endswith(
+        "```"
+    ):
+
+        text = text[:-3].strip()
+
+    start = text.find("{")
+    end = text.rfind("}")
+
+    if start == -1 or end == -1:
+        raise ValueError(
+            "Gemini did not return a JSON object."
+        )
+
+    return text[
+        start:end + 1
+    ]
+
+
+def generate_gold(
+    client,
+    model_name,
+    document_path,
+    metadata,
+):
+    from google.genai import types
+
+    prompt = build_prompt(
+        metadata
+    )
+
+    print(
+        f"  Sending {document_path.name} to Gemini..."
+    )
+
+    uploaded_file = client.files.upload(
+        file=document_path,
+    )
+
+    try:
+
+        response = client.models.generate_content(
+            model=model_name,
+            contents=[
+                types.Content(
+                    role="user",
+                    parts=[
+                        types.Part.from_text(
+                            text=prompt
+                        ),
+                        types.Part.from_uri(
+                            file_uri=uploaded_file.uri,
+                            mime_type=uploaded_file.mime_type,
+                        ),
+                    ],
+                )
+            ],
+            config=types.GenerateContentConfig(
+                temperature=0,
+                response_mime_type="application/json",
+            ),
+        )
+
+        if not response.text:
+            raise ValueError(
+                "Gemini returned an empty response."
+            )
+
+        cleaned = clean_json(
+            response.text
+        )
+
+        return json.loads(
+            cleaned
+        )
+
+    finally:
+
+        try:
+            client.files.delete(
+                name=uploaded_file.name
+            )
+        except Exception:
+            pass
+
+
+def validate_gold(data):
+
+    report = (
+        ExperimentReport
+        .model_validate(data)
+    )
+
+    return report
+
+
+def process_document(
+    client,
+    model_name,
+    document_path,
+    output_dir,
+    force=False,
+):
+
+    print()
+    print(
+        "=" * 70
+    )
+    print(
+        f"Processing: {document_path.name}"
+    )
+    print(
+        "=" * 70
+    )
+
+    metadata = parse_filename(
+        document_path
+    )
+
+    output_path = output_path_for(
+        metadata,
+        output_dir,
+    )
+
+    if output_path.exists() and not force:
+
+        print(
+            f"  Skipping existing gold JSON: {output_path}"
+        )
+
+        return "skipped"
+
+    print(
+        f"  Experiment : "
+        f"E{metadata['experiment_number']:02d}"
+    )
+
+    print(
+        f"  Semester   : "
+        f"{metadata['semester_prefix']}"
+    )
+
+    print(
+        f"  Division   : "
+        f"{metadata['division']}"
+    )
+
+    print(
+        f"  Roll       : "
+        f"{metadata['roll_number']}"
+    )
+
+    print(
+        f"  Part suffix: "
+        f"{metadata['part_suffix']}"
+    )
+
+    data = generate_gold(
+        client,
+        model_name,
+        document_path,
+        metadata,
+    )
+
+    report = validate_gold(
+        data
+    )
+
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    with open(
+        output_path,
+        "w",
+        encoding="utf-8",
+    ) as f:
+
+        json.dump(
+            report.model_dump(
+                mode="json"
+            ),
+            f,
+            indent=2,
+            ensure_ascii=False,
+        )
+
+    print(
+        f"  ✓ Valid ExperimentReport"
+    )
+
+    print(
+        f"  ✓ Saved: {output_path}"
+    )
+
+    return "generated"
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("docx_path")
-    ap.add_argument("--experiment-no", type=int, required=True)
-    ap.add_argument("--semester", default="5")
-    ap.add_argument("--division", required=True)
-    ap.add_argument("--roll", required=True)
-    ap.add_argument("--part-suffix", default=None)
-    ap.add_argument("--out", required=True)
-    ap.add_argument("--image-dir", default=None,
-                     help="Defaults to <out_dir>/assets/")
-    args = ap.parse_args()
 
-    out_dir = os.path.dirname(args.out) or "."
-    image_dir = args.image_dir or os.path.join(out_dir, "assets")
+    parser = argparse.ArgumentParser()
 
-    raw_instance = extract(
-        args.docx_path, args.experiment_no, args.semester, args.division,
-        args.roll, image_dir, args.part_suffix,
+    parser.add_argument(
+        "--examples-dir",
+        type=Path,
+        default=ROOT / "examples",
     )
 
-    # Hard validation gate: refuse to write anything that doesn't conform.
-    report = ExperimentReport.model_validate(raw_instance)
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=ROOT / "dataset" / "target_json",
+    )
 
-    os.makedirs(out_dir, exist_ok=True)
-    with open(args.out, "w") as f:
-        json.dump(report.model_dump(mode="json"), f, indent=2)
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=DEFAULT_MODEL,
+    )
 
-    print(f"OK: wrote validated gold JSON -> {args.out}")
-    print(f"  Sections extracted: {[s.heading for s in report.sections]}")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Regenerate gold JSON even when the output file already exists.",
+    )
+
+    parser.add_argument(
+        "--only",
+        nargs="*",
+        default=None,
+        help=(
+            "Optional filename filters. Each value can be an exact filename "
+            "or a substring such as E05."
+        ),
+    )
+
+    args = parser.parse_args()
+
+    examples_dir = (
+        args.examples_dir
+    )
+
+    if not examples_dir.is_absolute():
+
+        examples_dir = (
+            ROOT / examples_dir
+        )
+
+    output_dir = (
+        args.output_dir
+    )
+
+    if not output_dir.is_absolute():
+
+        output_dir = (
+            ROOT / output_dir
+        )
+
+    files = sorted(
+        [
+            *examples_dir.glob(
+                "*.pdf"
+            ),
+            *examples_dir.glob(
+                "*.PDF"
+            ),
+            *examples_dir.glob(
+                "*.docx"
+            ),
+            *examples_dir.glob(
+                "*.DOCX"
+            ),
+        ]
+    )
+
+    if not files:
+
+        print(
+            f"No PDF or DOCX files found in "
+            f"{examples_dir}"
+        )
+
+        return
+
+    if args.only:
+
+        filters = args.only
+
+        files = [
+            path
+            for path in files
+            if any(
+                item == path.name or item in path.name
+                for item in filters
+            )
+        ]
+
+        if not files:
+
+            print(
+                "No files matched --only filters."
+            )
+
+            return
+
+    print(
+        f"Found {len(files)} documents."
+    )
+
+    successful = []
+    skipped = []
+    failed = []
+    client = None
+
+    for document_path in files:
+
+        try:
+            metadata = parse_filename(
+                document_path
+            )
+
+            needs_generation = (
+                args.force
+                or not output_path_for(
+                    metadata,
+                    output_dir,
+                ).exists()
+            )
+
+            if needs_generation and client is None:
+
+                from google import genai
+
+                api_key = os.getenv(
+                    "GEMINI_API_KEY"
+                )
+
+                if not api_key:
+
+                    raise RuntimeError(
+                        "GEMINI_API_KEY environment variable "
+                        "is not set."
+                    )
+
+                client = genai.Client(
+                    api_key=api_key
+                )
+
+            success = process_document(
+                client,
+                args.model,
+                document_path,
+                output_dir,
+                force=args.force,
+            )
+
+            if success == "generated":
+                successful.append(
+                    document_path.name
+                )
+                time.sleep(1)
+
+            elif success == "skipped":
+                skipped.append(
+                    document_path.name
+                )
+
+        except Exception as e:
+
+            print(
+                f"  ✗ ERROR: {e}"
+            )
+
+            failed.append(
+                document_path.name
+            )
+
+    print()
+    print(
+        "=" * 70
+    )
+    print(
+        "EXTRACTION SUMMARY"
+    )
+    print(
+        "=" * 70
+    )
+
+    print(
+        f"Total      : {len(files)}"
+    )
+
+    print(
+        f"Successful : {len(successful)}"
+    )
+
+    print(
+        f"Skipped    : {len(skipped)}"
+    )
+
+    print(
+        f"Failed     : {len(failed)}"
+    )
+
+    if failed:
+
+        print()
+        print(
+            "Failed files:"
+        )
+
+        for name in failed:
+
+            print(
+                f"  ✗ {name}"
+            )
 
 
 if __name__ == "__main__":

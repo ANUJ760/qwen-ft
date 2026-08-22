@@ -41,22 +41,25 @@ import argparse
 import glob
 import json
 import os
+from pathlib import Path
 import random
 import sys
 import time
 
 
+ROOT = Path(__file__).resolve().parent.parent
 
 sys.path.insert(
     0,
-    os.path.join(
-        os.path.dirname(__file__),
-        "..",
-        "schema",
-    ),
+    str(ROOT),
+)
+sys.path.insert(
+    0,
+    str(ROOT / "schema"),
 )
 
 from schema import ExperimentReport  # noqa: E402
+from common.prompts import INFERENCE_SYSTEM_PROMPT, TEACHER_SYSTEM_PROMPT  # noqa: E402
 
 
 
@@ -179,6 +182,9 @@ Do not use Markdown code fences.
 Do not provide explanations.
 Do not provide text before or after the JSON.
 """
+
+SYSTEM_PROMPT_FOR_TEACHER = TEACHER_SYSTEM_PROMPT
+SYSTEM_PROMPT_FOR_INFERENCE = INFERENCE_SYSTEM_PROMPT
 
 
 
@@ -312,7 +318,9 @@ def mock_teacher(
                         f"{item['text'][:40]}..."
                     )
 
-    random.shuffle(fragments[1:])
+    tail = fragments[1:]
+    random.shuffle(tail)
+    fragments[1:] = tail
 
     return "\n".join(fragments)
 
@@ -352,19 +360,22 @@ def main():
 
     parser.add_argument(
         "--target-json-dir",
-        default="target_json",
+        type=Path,
+        default=ROOT / "dataset" / "target_json",
         help="Directory containing validated gold ExperimentReport JSON files.",
     )
 
     parser.add_argument(
         "--raw-content-out",
-        default="raw_content",
+        type=Path,
+        default=ROOT / "dataset" / "raw_content",
         help="Directory where generated raw-content files are stored.",
     )
 
     parser.add_argument(
         "--jsonl-out",
-        default="training_pairs.jsonl",
+        type=Path,
+        default=ROOT / "dataset" / "training_pairs.jsonl",
         help="Output JSONL file for fine-tuning.",
     )
 
@@ -392,6 +403,15 @@ def main():
         ),
     )
 
+    parser.add_argument(
+        "--force-raw",
+        action="store_true",
+        help=(
+            "Regenerate raw-content variants even when matching files "
+            "already exist."
+        ),
+    )
+
     args = parser.parse_args()
 
    
@@ -401,12 +421,22 @@ def main():
     )
 
 
+    target_json_dir = args.target_json_dir
+    raw_content_out = args.raw_content_out
+    jsonl_out = args.jsonl_out
+
+    if not target_json_dir.is_absolute():
+        target_json_dir = ROOT / target_json_dir
+
+    if not raw_content_out.is_absolute():
+        raw_content_out = ROOT / raw_content_out
+
+    if not jsonl_out.is_absolute():
+        jsonl_out = ROOT / jsonl_out
+
     gold_paths = sorted(
         glob.glob(
-            os.path.join(
-                args.target_json_dir,
-                "*.json",
-            )
+            str(target_json_dir / "*.json")
         )
     )
 
@@ -414,7 +444,7 @@ def main():
 
         print(
             f"No gold JSON files found in "
-            f"{args.target_json_dir}/. "
+            f"{target_json_dir}/. "
             f"Run extract_gold_json.py first.",
             file=sys.stderr,
         )
@@ -444,17 +474,20 @@ def main():
 
  
 
-    os.makedirs(
-        args.raw_content_out,
+    raw_content_out.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    jsonl_out.parent.mkdir(
+        parents=True,
         exist_ok=True,
     )
 
 
-
     n_written = 0
 
-    with open(
-        args.jsonl_out,
+    with jsonl_out.open(
         "w",
         encoding="utf-8",
     ) as jsonl_file:
@@ -499,36 +532,51 @@ def main():
 
             for style_name, style_instruction in styles:
 
-                if args.dry_run:
+                raw_path = (
+                    raw_content_out
+                    / f"{doc_id}__{style_name}.txt"
+                )
 
-                    raw_content = mock_teacher(
-                        gold,
-                        style_instruction,
+                if raw_path.exists() and not args.force_raw:
+
+                    raw_content = raw_path.read_text(
+                        encoding="utf-8"
+                    )
+
+                    print(
+                        f"  {doc_id} "
+                        f"[{style_name}] "
+                        f"reused -> {raw_path}"
                     )
 
                 else:
 
-                    raw_content = call_teacher(
-                        client,
-                        args.model,
-                        gold,
-                        style_instruction,
+                    if args.dry_run:
+
+                        raw_content = mock_teacher(
+                            gold,
+                            style_instruction,
+                        )
+
+                    else:
+
+                        raw_content = call_teacher(
+                            client,
+                            args.model,
+                            gold,
+                            style_instruction,
+                        )
+
+                    raw_path.write_text(
+                        raw_content,
+                        encoding="utf-8",
                     )
 
-             
-
-                raw_path = os.path.join(
-                    args.raw_content_out,
-                    f"{doc_id}__{style_name}.txt",
-                )
-
-                with open(
-                    raw_path,
-                    "w",
-                    encoding="utf-8",
-                ) as f:
-
-                    f.write(raw_content)
+                    print(
+                        f"  {doc_id} "
+                        f"[{style_name}] "
+                        f"-> {raw_path}"
+                    )
 
 
                 training_example = {
@@ -567,15 +615,9 @@ def main():
 
                 n_written += 1
 
-                print(
-                    f"  {doc_id} "
-                    f"[{style_name}] "
-                    f"-> {raw_path}"
-                )
-
     print(
         f"\nDone. {n_written} training pairs written "
-        f"to {args.jsonl_out}"
+        f"to {jsonl_out}"
     )
 
 

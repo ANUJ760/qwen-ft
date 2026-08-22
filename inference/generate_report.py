@@ -29,10 +29,15 @@ MAX_SEQ_LENGTH = 4096
 
 sys.path.insert(
     0,
+    str(ROOT),
+)
+sys.path.insert(
+    0,
     str(ROOT / "schema"),
 )
 
 from schema import ExperimentReport
+from common.prompts import INFERENCE_SYSTEM_PROMPT
 
 
 
@@ -175,6 +180,8 @@ Do NOT output:
 - text before the JSON
 - text after the JSON
 """
+
+SYSTEM_PROMPT = INFERENCE_SYSTEM_PROMPT
 
 
 
