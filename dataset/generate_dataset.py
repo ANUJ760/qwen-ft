@@ -127,19 +127,18 @@ Rules:
 
 SYSTEM_PROMPT_FOR_INFERENCE = """
 You convert a student's raw, unstructured experiment notes into a
-structured JSON ExperimentReport.
+structured ExperimentReport.
 
-The output MUST be a single valid JSON object conforming to the
-ExperimentReport schema.
+Your output MUST be exactly one valid JSON object.
 
-The JSON object must contain:
+The object MUST contain these top-level fields:
 
 - title
 - particulars
 - sections
 - submission_meta
 
-The particulars object must contain:
+The particulars object MUST contain:
 
 - case_study_title
 - aim
@@ -149,20 +148,76 @@ The particulars object must contain:
 - roll_number
 - date_of_compilation
 
-Body sections must:
+The sections array MUST:
 
-- start at section number 2
-- be numbered sequentially: 2, 3, 4, ...
-- contain at least one content block
+- contain at least one section
+- start at number 2
+- use sequential numbers: 2, 3, 4, ...
+- contain at least one content block per section
 
-Allowed content block types are:
+Allowed content block types:
 
 - paragraph
 - bullet_list
 - figure
 - table
 
-The submission_meta object must contain:
+Paragraph:
+
+{
+  "type": "paragraph",
+  "text": "..."
+}
+
+Bullet list:
+
+{
+  "type": "bullet_list",
+  "items": [
+    {
+      "lead_in": null,
+      "text": "..."
+    }
+  ]
+}
+
+Figure:
+
+{
+  "type": "figure",
+  "image_ref": "<ASSET_PLACEHOLDER>",
+  "caption": "...",
+  "figure_number": 1
+}
+
+Table:
+
+{
+  "type": "table",
+  "header": ["..."],
+  "rows": [["...", "..."]]
+}
+
+For figure image_ref, use "<ASSET_PLACEHOLDER>" unless an actual
+asset reference is explicitly provided.
+
+IMPORTANT DISTINCTION:
+
+"particulars.section" is the student's academic section/division,
+such as "A2".
+
+"sections[].number" is the numbered section of the generated document,
+such as 2, 3, 4.
+
+These are different concepts. Never use a document section number as
+the student's academic section.
+
+"submission_meta.division" is the same academic division represented
+by particulars.section.
+
+Do not invent academic metadata.
+
+The submission_meta object MUST have:
 
 - experiment_number
 - semester_prefix
@@ -170,17 +225,27 @@ The submission_meta object must contain:
 - roll_number
 - part_suffix
 
-For figure blocks, use:
+If submission metadata is supplied separately by the application, copy
+it exactly.
 
-"<ASSET_PLACEHOLDER>"
+Do not infer submission metadata from the raw notes unless explicitly
+instructed to do so.
 
-for image_ref unless an asset reference is explicitly available.
+Preserve the facts from the student's raw notes.
+
+Do not invent technical details, technologies, results, figures, tables,
+names, dates, or claims.
 
 Output ONLY the JSON object.
 
-Do not use Markdown code fences.
-Do not provide explanations.
-Do not provide text before or after the JSON.
+Do not output:
+- Markdown
+- code fences
+- explanations
+- reasoning
+- <think> blocks
+- text before the JSON
+- text after the JSON
 """
 
 SYSTEM_PROMPT_FOR_TEACHER = TEACHER_SYSTEM_PROMPT
@@ -391,7 +456,7 @@ def main():
 
     parser.add_argument(
         "--model",
-        default="gemini-2.5-flash",
+        default="gemini-3.6-flash",
         help="Gemini model used as the teacher.",
     )
 
@@ -453,24 +518,6 @@ def main():
 
 
     client = None
-
-    if not args.dry_run:
-
-        from google import genai
-
-        if not os.environ.get("GEMINI_API_KEY"):
-
-            print(
-                "GEMINI_API_KEY not set. "
-                "Set it before running without --dry-run.",
-                file=sys.stderr,
-            )
-
-            sys.exit(1)
-
-        client = genai.Client(
-            api_key=os.environ["GEMINI_API_KEY"]
-        )
 
  
 
@@ -559,6 +606,24 @@ def main():
                         )
 
                     else:
+
+                        if client is None:
+
+                            from google import genai
+
+                            if not os.environ.get("GEMINI_API_KEY"):
+
+                                print(
+                                    "GEMINI_API_KEY not set. "
+                                    "Set it before running without --dry-run.",
+                                    file=sys.stderr,
+                                )
+
+                                sys.exit(1)
+
+                            client = genai.Client(
+                                api_key=os.environ["GEMINI_API_KEY"]
+                            )
 
                         raw_content = call_teacher(
                             client,

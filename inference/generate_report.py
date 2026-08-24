@@ -38,6 +38,7 @@ sys.path.insert(
 
 from schema import ExperimentReport
 from common.prompts import INFERENCE_SYSTEM_PROMPT
+from common.normalize import extract_first_json_object, normalize_report_data
 
 
 
@@ -264,23 +265,20 @@ def clean_generated_output(
         ].strip()
 
 
+    # Extract the FIRST balanced JSON object instead of slicing from the
+    # first "{" to the last "}": models sometimes emit a stray trailing
+    # brace or a duplicated object after the real payload, and the naive
+    # slice preserves that junk, making json.loads fail with "Extra data".
+    try:
 
-    start = generated_text.find("{")
+        return extract_first_json_object(generated_text)
 
-    end = generated_text.rfind("}")
-
-    if start == -1 or end == -1 or end <= start:
+    except ValueError:
 
         raise ValueError(
             "Model did not produce a JSON object.\n\n"
             f"Model output:\n{generated_text}"
         )
-
-    generated_text = generated_text[
-        start:end + 1
-    ]
-
-    return generated_text.strip()
 
 
 
@@ -359,6 +357,10 @@ def generate_report(
 
 
 
+# normalize_report_data() moved to common/normalize.py so gold extraction
+# and inference share the same deterministic repair helpers.
+
+
 def validate_report(
     result: str,
 ):
@@ -369,10 +371,23 @@ def validate_report(
 
     except json.JSONDecodeError as e:
 
-        raise ValueError(
-            f"Model output is not valid JSON: {e}\n\n"
-            f"Output:\n{result}"
-        )
+        # Recovery path: the output may be a complete JSON object wrapped
+        # in trailing junk (stray closing brace, duplicated object,
+        # commentary). Parse just the first balanced object.
+        try:
+
+            parsed = json.loads(
+                extract_first_json_object(result)
+            )
+
+        except ValueError:
+
+            raise ValueError(
+                f"Model output is not valid JSON: {e}\n\n"
+                f"Output:\n{result}"
+            )
+
+    parsed = normalize_report_data(parsed)
 
     try:
 

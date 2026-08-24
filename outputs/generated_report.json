@@ -1,0 +1,83 @@
+{
+  "title": "Online Voting System Design Report",
+  "particulars": {
+    "case_study_title": "Online Voting System",
+    "aim": "Design an online voting system where registered students can securely cast votes.",
+    "problem_statement": "Students need registration and login. Admin manages candidates and election details. After login, students can see candidates and cast votes. The system should prevent multiple voting.",
+    "author": "<MISSING>",
+    "section": "CSE",
+    "roll_number": "<MISSING>",
+    "date_of_compilation": "2023-10-15"
+  },
+  "sections": [
+    {
+      "number": 2,
+      "title": "System Overview",
+      "content": [
+        {
+          "type": "paragraph",
+          "text": "This report outlines the design of an online voting system that allows registered students to securely cast votes. The system includes registration and login functionality for students, and admin management of candidates and election details. The system must prevent multiple voting to ensure the integrity of the voting process."
+        },
+        {
+          "type": "bullet_list",
+          "items": [
+            {
+              "lead_in": null,
+              "text": "Students can register and log in to the system."
+            },
+            {
+              "lead_in": null,
+              "text": "Admin can manage candidates and election details."
+            },
+            {
+              "lead_in": null,
+              "text": "After login, students can view candidates and cast votes."
+            },
+            {
+              "lead_in": null,
+              "text": "The system must prevent multiple voting."
+            }
+          ]
+        },
+        {
+          "type": "figure",
+          "image_ref": "<ASSET_PLACEHOLDER>",
+          "caption": "UML Diagram of the Online Voting System",
+          "figure_number": null
+        },
+        {
+          "type": "table",
+          "header": [
+            "Component",
+            "Function"
+          ],
+          "rows": [
+            [
+              "User Interface",
+              "Provides registration, login, and voting functionality for students and admin"
+            ],
+            [
+              "Database",
+              "Stores user information, election details, and voting data"
+            ],
+            [
+              "Backend",
+              "Handles user authentication, election management, and voting logic"
+            ],
+            [
+              "Admin Panel",
+              "Allows admin to manage candidates and election details"
+            ]
+          ]
+        }
+      ]
+    }
+  ],
+  "submission_meta": {
+    "experiment_number": 1,
+    "semester_prefix": "SEM1",
+    "division": "CSE",
+    "roll_number": "<MISSING>",
+    "part_suffix": null
+  }
+}

@@ -19,6 +19,10 @@ sys.path.insert(
 
 from schema import ExperimentReport
 from common.prompts import build_gold_extraction_prompt
+from common.normalize import (
+    enforce_submission_consistency,
+    extract_first_json_object,
+)
 
 
 DEFAULT_MODEL = "gemini-3.6-flash"
@@ -225,8 +229,27 @@ def build_prompt(metadata):
     )
 
 def output_path_for(metadata, output_dir):
+    """Build the gold JSON output path.
+
+    The filename mirrors SubmissionMeta.filename() so that documents with
+    the same experiment number but different roll numbers (e.g. E05_5A2_33
+    vs E05_5A2_38) do NOT collide. Without the roll number, the second
+    document would silently overwrite the first.
+    """
     experiment = (
         metadata["experiment_number"]
+    )
+
+    semester = (
+        metadata["semester_prefix"]
+    )
+
+    division = (
+        metadata["division"]
+    )
+
+    roll = (
+        metadata["roll_number"]
     )
 
     suffix = (
@@ -236,7 +259,7 @@ def output_path_for(metadata, output_dir):
 
     return (
         output_dir
-        / f"E{experiment:02d}{suffix}.json"
+        / f"E{experiment:02d}_{semester}{division}_{roll}{suffix}.json"
     )
 
 
@@ -273,17 +296,35 @@ def clean_json(text):
 
         text = text[:-3].strip()
 
-    start = text.find("{")
-    end = text.rfind("}")
-
-    if start == -1 or end == -1:
+    try:
+        return extract_first_json_object(text)
+    except ValueError:
         raise ValueError(
             "Gemini did not return a JSON object."
         )
 
-    return text[
-        start:end + 1
-    ]
+
+MAX_RETRIES = 5
+RETRY_BASE_DELAY_SECONDS = 2
+
+
+def _is_retryable_error(exc: Exception) -> bool:
+    """Transient API errors (server overload / rate limiting) are retryable;
+    validation and other deterministic failures are not."""
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "503",
+            "429",
+            "unavailable",
+            "resource exhausted",
+            "rate limit",
+            "high demand",
+            "temporarily",
+            "try again later",
+        )
+    )
 
 
 def generate_gold(
@@ -308,40 +349,73 @@ def generate_gold(
 
     try:
 
-        response = client.models.generate_content(
-            model=model_name,
-            contents=[
-                types.Content(
-                    role="user",
-                    parts=[
-                        types.Part.from_text(
-                            text=prompt
-                        ),
-                        types.Part.from_uri(
-                            file_uri=uploaded_file.uri,
-                            mime_type=uploaded_file.mime_type,
-                        ),
+        last_error = None
+
+        for attempt in range(1, MAX_RETRIES + 1):
+
+            try:
+
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=[
+                        types.Content(
+                            role="user",
+                            parts=[
+                                types.Part.from_text(
+                                    text=prompt
+                                ),
+                                types.Part.from_uri(
+                                    file_uri=uploaded_file.uri,
+                                    mime_type=uploaded_file.mime_type,
+                                ),
+                            ],
+                        )
                     ],
+                    config=types.GenerateContentConfig(
+                        temperature=0,
+                        response_mime_type="application/json",
+                    ),
                 )
-            ],
-            config=types.GenerateContentConfig(
-                temperature=0,
-                response_mime_type="application/json",
-            ),
-        )
 
-        if not response.text:
-            raise ValueError(
-                "Gemini returned an empty response."
-            )
+                if not response.text:
+                    raise ValueError(
+                        "Gemini returned an empty response."
+                    )
 
-        cleaned = clean_json(
-            response.text
-        )
+                cleaned = clean_json(
+                    response.text
+                )
 
-        return json.loads(
-            cleaned
-        )
+                return json.loads(
+                    cleaned
+                )
+
+            except Exception as e:
+
+                last_error = e
+
+                if not _is_retryable_error(e):
+                    raise
+
+                if attempt < MAX_RETRIES:
+
+                    delay = (
+                        RETRY_BASE_DELAY_SECONDS
+                        * (2 ** (attempt - 1))
+                    )
+
+                    print(
+                        f"  ⚠ Transient API error "
+                        f"(attempt {attempt}/{MAX_RETRIES}): {e}"
+                    )
+
+                    print(
+                        f"  Retrying in {delay}s..."
+                    )
+
+                    time.sleep(delay)
+
+        raise last_error
 
     finally:
 
@@ -353,7 +427,48 @@ def generate_gold(
             pass
 
 
-def validate_gold(data):
+def normalize_sections(data):
+    """Renumber body sections sequentially starting at 2.
+
+    The schema contract reserves section 1 for the Particulars block, so
+    body sections must be numbered 2, 3, 4, ... The LLM frequently returns
+    sections numbered from 1 (mirroring the source document's own headings),
+    which fails schema validation. This deterministic post-processing step
+    guarantees the contract is satisfied regardless of what the model emits.
+    """
+    data = dict(data)
+    sections = data.get("sections")
+    if not isinstance(sections, list):
+        return data
+
+    normalized = []
+    for index, section in enumerate(sections, start=2):
+        if isinstance(section, dict):
+            section = dict(section)
+            section["number"] = index
+        normalized.append(section)
+
+    data["sections"] = normalized
+    return data
+
+
+def validate_gold(data, metadata=None):
+    """Validate a Gemini payload against ExperimentReport.
+
+    Before Pydantic runs, deterministic repairs are applied:
+      - normalize_sections(): body sections renumbered 2, 3, ...
+      - enforce_submission_consistency(): submission_meta forced to the
+        authoritative filename *metadata* and particulars.section /
+        particulars.roll_number synced to match, so cross-field
+        validators cannot fail on model drift.
+    """
+
+    data = normalize_sections(data)
+
+    data = enforce_submission_consistency(
+        data,
+        metadata,
+    )
 
     report = (
         ExperimentReport
@@ -432,7 +547,8 @@ def process_document(
     )
 
     report = validate_gold(
-        data
+        data,
+        metadata,
     )
 
     output_dir.mkdir(

@@ -13,3 +13,4 @@ finetune/checkpoints/*
 !finetune/checkpoints/.gitkeep
 guidelines/
 venv312/
+TECHNICAL_FLOW.md
