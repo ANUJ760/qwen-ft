@@ -41,7 +41,7 @@ doc_compiler/
 │                                  E02-shaped input (rendered + visually
 │                                  inspected).
 │
-├── dataset/                      [ADD IT BEFORE TRAINING]
+├── dataset/                      [BUILT]
 │   ├── generate_dataset.py       Teacher-distillation script: for each
 │   │                             example doc, (a) reverse-generates a
 │   │                             plausible messy "raw content" input, and
