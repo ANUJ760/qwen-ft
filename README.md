@@ -1,6 +1,6 @@
-# Document Compilation Generator
+# Finetuned model for document generation
 
-AI-powered pipeline: raw content → fine-tuned LLM → structured JSON →
+Pipeline: raw content → fine-tuned LLM → structured JSON →
 validation → deterministic formatter → DOCX/PDF, matching a submission's
 Compilation Guidelines.
 
@@ -41,7 +41,7 @@ doc_compiler/
 │                                  E02-shaped input (rendered + visually
 │                                  inspected).
 │
-├── dataset/                      [NOT YET BUILT]
+├── dataset/                      [ADD IT BEFORE TRAINING]
 │   ├── generate_dataset.py       Teacher-distillation script: for each
 │   │                             example doc, (a) reverse-generates a
 │   │                             plausible messy "raw content" input, and
@@ -95,14 +95,4 @@ Raw Content --> Fine-tuned LLM (+ Guidelines via RAG/prompting)
             --> DOCX --> PDF (outputs/)
 ```
 
-## Status
 
-| Component | Status |
-|---|---|
-| Content schema | ✅ Built & validated against real example |
-| Formatter | ✅ Built & verified (rendered + visually inspected) |
-| Dataset generation | ⬜ Next up |
-| QLoRA fine-tuning | ⬜ Pending dataset |
-| Inference + RAG guideline injection | ⬜ Pending fine-tune |
-| Validation wrapper | ⬜ Pending inference loop |
-| Evaluation harness | ⬜ Pending fine-tune |
