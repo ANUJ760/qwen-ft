@@ -17,11 +17,11 @@ doc_compiler/
 │                                     this file — see formatter/formatter.py.
 │
 ├── examples/                    Practical/example source documents used to
-│   ├── E01_5A2_33a.pdf          derive the content schema and (later) seed
-│   ├── E01_5A2_33b.pdf          the teacher-distillation dataset.
-│   ├── E02_5A2_33.docx          NOTE: E01_5A2_33b (the embedded SRS) is
-│   ├── E02_5A2_33.pdf           excluded from schema/dataset scope per
-│   └── E03_5A2_33.docx          project decision — treated as an exception,
+│   ├── training-data1         derive the content schema and (later) seed
+│   ├── training-data2          the teacher-distillation dataset.
+│   ├── training-data3          NOTE: E01_5A2_33b (the embedded SRS) is
+│   ├── training-data4           excluded from schema/dataset scope per
+│   └── training-data5          project decision — treated as an exception,
 │                                 not a template instance.
 │
 ├── schema/
