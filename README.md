@@ -8,7 +8,7 @@ Compilation Guidelines.
 
 ```
 doc_compiler/
-├── README.md                    (this file)
+├── README.md                    
 │
 ├── guidelines/
 │   └── Compilation_Guidelines.pdf   Source formatting rules (margins, fonts,
