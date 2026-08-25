@@ -53,7 +53,7 @@ doc_compiler/
 │   └── training_pairs.jsonl      Final assembled fine-tuning dataset
 │                                 (prompt/completion or chat-format pairs).
 │
-├── finetune/                     [NOT YET BUILT]
+├── finetune/                     [BUILT]
 │   ├── train_qlora.py            LoRA/QLoRA fine-tuning script (local GPU,
 │   │                             8-12GB VRAM -> 7B-class base model,
 │   │                             4-bit quant).
@@ -62,7 +62,7 @@ doc_compiler/
 │   │                             hyperparameters.
 │   └── checkpoints/              Saved LoRA adapters.
 │
-├── inference/                    [NOT YET BUILT]
+├── inference/                    [BUILT]
 │   └── generate_report.py        Runs fine-tuned model against new raw
 │                                 content, with the current Compilation
 │                                 Guidelines injected via prompting/RAG
